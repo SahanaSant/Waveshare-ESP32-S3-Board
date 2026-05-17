@@ -106,6 +106,7 @@ static void button_event_cb(lv_event_t * e)
 {
     button_press_count++;
     Serial.printf("buttons pressed: %d\n", button_press_count);
+    lv_label_set_text_fmt(status_label, "button pressed: %d times", button_press_count);
 }
 
 // ============================================================================
@@ -117,7 +118,7 @@ void create_ui(void)
     lv_obj_set_style_bg_color(lv_scr_act(), lv_color_hex(0x101820), LV_PART_MAIN);
 
     status_label = lv_label_create(lv_scr_act());
-    lv_label_set_text(status_label, "LVGL is alive");
+    lv_label_set_text_fmt(status_label, "button pressed: %d times", button_press_count);
     lv_obj_set_style_text_color(status_label, lv_color_hex(0xFFFFFF), LV_PART_MAIN);
     lv_obj_align(status_label, LV_ALIGN_TOP_MID, 0, 36);
 
