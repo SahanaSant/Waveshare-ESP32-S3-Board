@@ -105,16 +105,17 @@ static bool init_speaker_test(void)
 
     const i2s_config_t i2s_config = {
         .mode = (i2s_mode_t)(I2S_MODE_MASTER | I2S_MODE_TX),
-        .sample_rate = AUDIO_SAMPLE_RATE,
-        .bits_per_sample = I2S_BITS_PER_SAMPLE_16BIT,
-        .channel_format = I2S_CHANNEL_FMT_RIGHT_LEFT,
+        .sample_rate = AUDIO_SAMPLE_RATE, //44 100 audio samples per second 
+        .bits_per_sample = I2S_BITS_PER_SAMPLE_16BIT, //each sample is stored in a 16 bit numner 
+        .channel_format = I2S_CHANNEL_FMT_RIGHT_LEFT, 
         .communication_format = I2S_COMM_FORMAT_STAND_I2S,
         .intr_alloc_flags = ESP_INTR_FLAG_LEVEL1,
+        //The dma basically creates a queue of memory, audio chunks are sent. DMA can allow the hardware to keep outputting audio while your CPU is doing other things
         .dma_buf_count = 8,
         .dma_buf_len = 256,
-        .use_apll = true,
+        .use_apll = true, //use  a gud clock source
         .tx_desc_auto_clear = true,
-        .fixed_mclk = AUDIO_MCLK_HZ,
+        .fixed_mclk = AUDIO_MCLK_HZ, 
         .mclk_multiple = I2S_MCLK_MULTIPLE_256,
         .bits_per_chan = I2S_BITS_PER_CHAN_16BIT};
 
@@ -141,25 +142,25 @@ static bool init_speaker_test(void)
 
 static void play_test_chime(void)
 {
-    constexpr size_t frame_count = 256;
+    constexpr size_t frame_count = 256;//create an array of 256 length
     int16_t samples[frame_count * 2];
-    const float note_frequencies[] = {523.25f, 659.25f, 783.99f};
+    const float note_frequencies[] = {523.25f, 659.25f, 783.99f}; 
 
     for (float frequency : note_frequencies)
     {
-        for (int chunk = 0; chunk < 60; chunk++)
+        for (int chunk = 0; chunk < 60; chunk++) 
         {
             for (size_t i = 0; i < frame_count; i++)
             {
                 const size_t sample_index = (chunk * frame_count) + i;
                 const float phase = 2.0f * PI * frequency * sample_index / AUDIO_SAMPLE_RATE;
-                const int16_t sample = (int16_t)(sinf(phase) * 5000);
-                samples[i * 2] = sample;
+                const int16_t sample = (int16_t)(sinf(phase) * 5000); //create a sin wave to generate the sound 
+                samples[i * 2] = sample; // samples make the chunk, the chunk makes the note
                 samples[i * 2 + 1] = sample;
             }
 
             size_t bytes_written = 0;
-            i2s_write(I2S_NUM_0, samples, sizeof(samples), &bytes_written, portMAX_DELAY);
+            i2s_write(I2S_NUM_0, samples, sizeof(samples), &bytes_written, portMAX_DELAY); //send that chunk to the speaker, senk 60 chunks of each of those frequencies
         }
     }
 
