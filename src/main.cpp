@@ -63,7 +63,7 @@ Arduino_GFX *gfx = new Arduino_ST7796(
 
 // ============================================================================
 //  LVGL STATE
-//  Buffers, display driver state, and UI objects shared across the program
+//  Buffers and display driver state owned by the main coordinator
 // ============================================================================
 
 uint32_t screenWidth;
@@ -72,9 +72,13 @@ uint32_t bufSize;
 lv_disp_draw_buf_t draw_buf;
 lv_color_t *disp_draw_buf1;
 lv_color_t *disp_draw_buf2;
-static int button_press_count = 0;
 lv_disp_drv_t disp_drv;
-lv_obj_t *status_label;
+
+// ============================================================================
+//  MODULE ENTRY POINTS
+//  main.cpp coordinates these pieces without owning their internal details
+// ============================================================================
+void display_ui_create(void);
 
 // ============================================================================
 //  TEMPORARY SPEAKER TEST
@@ -213,50 +217,6 @@ void my_touchpad_read(lv_indev_drv_t *indev_drv, lv_indev_data_t *data)
 
 
 // ============================================================================
-//  UI EVENTS
-//  Callback functions that define what widgets do when the user interacts
-// ============================================================================
-static void button_event_cb(lv_event_t * e)
-{
-    button_press_count++;
-    lv_label_set_text_fmt(status_label, "button pressed: %d times", button_press_count);
-}
-
-// ============================================================================
-//  UI CONSTRUCTION
-//  Build and arrange the visible LVGL widgets for this screen
-// ============================================================================
-void create_ui(void)
-{
-    lv_obj_set_style_bg_color(lv_scr_act(), lv_color_hex(0x101820), LV_PART_MAIN);
-
-    status_label = lv_label_create(lv_scr_act());
-    lv_label_set_text_fmt(status_label, "button pressed: %d times", button_press_count);
-    lv_obj_set_style_text_color(status_label, lv_color_hex(0xFFFFFF), LV_PART_MAIN);
-    lv_obj_align(status_label, LV_ALIGN_TOP_MID, 0, 36);
-
-    //Example button
-    lv_obj_t *button = lv_btn_create(lv_scr_act());
-    lv_obj_set_size(button, 180, 70);
-    lv_obj_align(button, LV_ALIGN_CENTER, 0, 10);
-    lv_obj_add_event_cb(button, button_event_cb, LV_EVENT_CLICKED, NULL);
-
-    lv_obj_t *button_label = lv_label_create(button);
-    lv_label_set_text(button_label, "Tap me");
-    lv_obj_center(button_label);
-
-    //My test button
-    lv_obj_t *button2 = lv_btn_create(lv_scr_act());
-    lv_obj_set_size(button2, 180, 70);
-    lv_obj_align(button2, LV_ALIGN_CENTER, 0, 90);
-    lv_obj_add_event_cb(button2, button_event_cb, LV_EVENT_CLICKED, NULL);
-
-    lv_obj_t *button_label2 = lv_label_create(button2);
-    lv_label_set_text(button_label2, "Tap me as well");
-    lv_obj_center(button_label2);
-}
-
-// ============================================================================
 //  STARTUP
 //  Bring up the board, initialize LVGL, register drivers, and create the UI
 // ============================================================================
@@ -321,7 +281,7 @@ void setup(void)
     indev_drv.read_cb = my_touchpad_read;
     lv_indev_drv_register(&indev_drv);
 
-    create_ui();
+    display_ui_create();
 }
 
 // ============================================================================
@@ -330,6 +290,8 @@ void setup(void)
 // ============================================================================
 void loop(void)
 {
-    lv_timer_handler();
+    lv_timer_handler(); //lvgl will simply handle all the event callbacls
+    //above the display ui image just produces a picture. that is stored in static storage
     delay(5);
+    //heap handles lvgl draw buffers, lvgl widgets
 }
