@@ -5,21 +5,23 @@
 
 #include <lvgl.h>
 
-// ============================================================================
-//  UI STATE
-//  Kept private to the display module so main.cpp only coordinates modules
-// ============================================================================
-static int button_press_count = 0;
 static lv_obj_t *status_label = nullptr;
+static lv_obj_t *song_label = nullptr;
 
-// ============================================================================
-//  UI EVENTS
-//  Callback functions that define what widgets do when the user interacts
-// ============================================================================
-static void button_event_cb(lv_event_t *e)
+void display_ui_set_status(const char *text)
 {
-    button_press_count++;
-    lv_label_set_text_fmt(status_label, "button pressed: %d times", button_press_count);
+    if (status_label)
+    {
+        lv_label_set_text(status_label, text);
+    }
+}
+
+void display_ui_set_song(const char *text)
+{
+    if (song_label)
+    {
+        lv_label_set_text(song_label, text);
+    }
 }
 
 // ============================================================================
@@ -30,26 +32,22 @@ void display_ui_create(void)
 {
     lv_obj_set_style_bg_color(lv_scr_act(), lv_color_hex(0x101820), LV_PART_MAIN);
 
+    lv_obj_t *title_label = lv_label_create(lv_scr_act());
+    lv_label_set_text(title_label, "WAV Player");
+    lv_obj_set_style_text_color(title_label, lv_color_hex(0xFFFFFF), LV_PART_MAIN);
+    lv_obj_set_style_text_font(title_label, &lv_font_montserrat_16, LV_PART_MAIN);
+    lv_obj_align(title_label, LV_ALIGN_TOP_MID, 0, 42);
+
+    song_label = lv_label_create(lv_scr_act());
+    lv_label_set_text(song_label, "/music");
+    lv_label_set_long_mode(song_label, LV_LABEL_LONG_SCROLL_CIRCULAR);
+    lv_obj_set_width(song_label, 260);
+    lv_obj_set_style_text_color(song_label, lv_color_hex(0xB8D8E8), LV_PART_MAIN);
+    lv_obj_set_style_text_align(song_label, LV_TEXT_ALIGN_CENTER, LV_PART_MAIN);
+    lv_obj_align(song_label, LV_ALIGN_CENTER, 0, -20);
+
     status_label = lv_label_create(lv_scr_act());
-    lv_label_set_text_fmt(status_label, "button pressed: %d times", button_press_count);
+    lv_label_set_text(status_label, "Looking for music...");
     lv_obj_set_style_text_color(status_label, lv_color_hex(0xFFFFFF), LV_PART_MAIN);
-    lv_obj_align(status_label, LV_ALIGN_TOP_MID, 0, 36);
-
-    lv_obj_t *button = lv_btn_create(lv_scr_act());
-    lv_obj_set_size(button, 180, 70);
-    lv_obj_align(button, LV_ALIGN_CENTER, 0, 10);
-    lv_obj_add_event_cb(button, button_event_cb, LV_EVENT_CLICKED, NULL);
-
-    lv_obj_t *button_label = lv_label_create(button);
-    lv_label_set_text(button_label, "Tap me");
-    lv_obj_center(button_label);
-
-    lv_obj_t *button2 = lv_btn_create(lv_scr_act());
-    lv_obj_set_size(button2, 180, 70);
-    lv_obj_align(button2, LV_ALIGN_CENTER, 0, 90);
-    lv_obj_add_event_cb(button2, button_event_cb, LV_EVENT_CLICKED, NULL);
-
-    lv_obj_t *button_label2 = lv_label_create(button2);
-    lv_label_set_text(button_label2, "Tap me as well");
-    lv_obj_center(button_label2);
+    lv_obj_align(status_label, LV_ALIGN_CENTER, 0, 32);
 }
