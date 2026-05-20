@@ -62,6 +62,11 @@ lv_disp_drv_t disp_drv;
 
 static bool start_sd_audio_playback(void)
 {
+    // This function is the mini playlist flow:
+    // 1. Mount SD
+    // 2. Find the second WAV in /music
+    // 3. Tell the audio player to start it
+    // 4. Keep the touchscreen updated instead of using Serial Monitor
     display_ui_set_status("Mounting SD card...");
 
     if (!sd_manager_mount())
@@ -72,6 +77,8 @@ static bool start_sd_audio_playback(void)
 
     display_ui_set_status("Scanning /music...");
 
+    // 1 means "second song" because the finder counts like arrays:
+    // 0 = first, 1 = second.
     String song_path = file_browser_find_nth_wav("/music", 1);
     if (song_path.length() == 0)
     {
@@ -211,7 +218,11 @@ void setup(void)
 // ============================================================================
 void loop(void)
 {
+    // Keep feeding audio chunks. If this does not run often, the song will stutter.
     audio_player_loop();
+
+    // When the player reaches the end, it exposes "Finished" as its status.
+    // Main owns the screen, so main is the one that paints that message.
     if (strcmp(audio_player_last_error(), "Finished") == 0)
     {
         display_ui_set_status("Finished");
