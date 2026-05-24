@@ -6,12 +6,25 @@
 #include <SD_MMC.h>
 #include "file_browser.h"
 
+// This file only picks filenames. It never plays or draws anything itself:
+// main.cpp sends returned WAV paths to audio_player.cpp and returned image
+// paths to display_ui.cpp.
+
 static bool is_wav_file(const String &path)
 {
     // Make the extension check chill about caps, so SONG.WAV and song.wav both count.
     String lower = path;
     lower.toLowerCase();
     return lower.endsWith(".wav");
+}
+
+static bool is_background_image(const String &path)
+{
+    // LVGL can decode these normally from the SD card. JPEG needs a different
+    // decoder, so for now drop a PNG or BMP in /images and it just works.
+    String lower = path;
+    lower.toLowerCase();
+    return lower.endsWith(".png") || lower.endsWith(".bmp");
 }
 
 static String find_nth_wav_in_dir(const char *dir_path, size_t target_index, size_t &current_index)
@@ -65,4 +78,57 @@ String file_browser_find_nth_wav(const char *dir_path, size_t target_index)
     // The helper does the real searching because it needs to carry this count through recursion.
     size_t current_index = 0;
     return find_nth_wav_in_dir(dir_path, target_index, current_index);
+}
+
+static String find_background_image_in_dir(const char *dir_path, String &fallback)
+{
+    // This mirrors the WAV search above, but it has one extra rule:
+    // a name containing "lockscreen" wins over ordinary album/picture files.
+    // Its returned path travels next to display_ui_set_background() in main.cpp.
+    File dir = SD_MMC.open(dir_path);
+    if (!dir || !dir.isDirectory())
+    {
+        return "";
+    }
+
+    File file = dir.openNextFile();
+    while (file)
+    {
+        String path = file.path();
+        if (file.isDirectory())
+        {
+            String lockscreen = find_background_image_in_dir(path.c_str(), fallback);
+            if (lockscreen.length() > 0)
+            {
+                return lockscreen;
+            }
+        }
+        else if (is_background_image(path))
+        {
+            String lower = path;
+            lower.toLowerCase();
+            if (lower.indexOf("lockscreen") >= 0)
+            {
+                // A file named something like lockscreen.png is the obvious
+                // choice even if album art is sitting in this folder too.
+                return path;
+            }
+            if (fallback.length() == 0)
+            {
+                fallback = path;
+            }
+        }
+        file = dir.openNextFile();
+    }
+
+    return "";
+}
+
+String file_browser_find_background_image(const char *dir_path)
+{
+    // The second value is our backup plan if /images has a picture but none
+    // happens to be named lockscreen yet.
+    String fallback;
+    String lockscreen = find_background_image_in_dir(dir_path, fallback);
+    return lockscreen.length() > 0 ? lockscreen : fallback;
 }

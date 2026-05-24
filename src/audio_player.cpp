@@ -17,6 +17,11 @@
 #define AUDIO_MCLK_MULTIPLE 256
 #define AUDIO_VOLUME 70
 
+// How this module links to the screen:
+// start_sd_audio_playback() in main.cpp calls audio_player_start_wav().
+// loop() in main.cpp keeps calling audio_player_loop() to stream the sound.
+// pause_button_event_cb() in display_ui.cpp calls audio_player_toggle_pause().
+
 struct WavInfo
 {
     // Stuff we pull out of the WAV header before audio starts.
@@ -30,7 +35,11 @@ struct WavInfo
 
 static File wav_file;
 static WavInfo current_wav;
+// These four values are the playback memory shared by the public functions:
+// audio_player_loop() reads them, toggle_pause() changes audio_paused, and
+// main.cpp reads last_error through audio_player_last_error() for screen text.
 static bool audio_playing = false;
+static bool audio_paused = false;
 static uint32_t bytes_played = 0;
 static const char *last_error = "";
 
@@ -235,6 +244,7 @@ bool audio_player_start_wav(const String &path)
     wav_file.seek(current_wav.data_offset);
     bytes_played = 0;
     audio_playing = true;
+    audio_paused = false;
     last_error = "";
     return true;
 }
@@ -247,7 +257,9 @@ void audio_player_loop(void)
     static uint8_t file_buffer[2048];
     static int16_t stereo_buffer[2048];
 
-    if (!audio_playing)
+    // Pausing is delightfully simple here: leave the file position alone,
+    // and stop reading/sending chunks until the button says go again.
+    if (!audio_playing || audio_paused)
     {
         return;
     }
@@ -294,6 +306,25 @@ void audio_player_loop(void)
     // This is the actual "make noise" call: hand the sample bytes to I2S and wait until accepted.
     size_t bytes_written = 0;
     i2s_write(I2S_NUM_0, write_buffer, write_bytes, &bytes_written, portMAX_DELAY);
+}
+
+bool audio_player_toggle_pause(void)
+{
+    // Do not pretend a pause worked before a song starts or after it has ended.
+    if (!audio_playing)
+    {
+        return false;
+    }
+
+    audio_paused = !audio_paused;
+    // A tiny chunk may already be on its way to the speaker when pause is tapped.
+    // Let it finish instead of wiping queued samples and accidentally skipping audio.
+    return true;
+}
+
+bool audio_player_is_paused(void)
+{
+    return audio_paused;
 }
 
 const char *audio_player_last_error(void)
