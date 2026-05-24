@@ -7,7 +7,7 @@
 #include "file_browser.h"
 
 // This file only picks filenames. It never plays or draws anything itself:
-// main.cpp sends returned WAV paths to audio_player.cpp and returned image
+// music_controller.cpp sends returned WAV paths to audio_player.cpp and returned image
 // paths to display_ui.cpp.
 
 static bool is_wav_file(const String &path)
@@ -20,11 +20,14 @@ static bool is_wav_file(const String &path)
 
 static bool is_background_image(const String &path)
 {
-    // LVGL can decode these normally from the SD card. JPEG needs a different
-    // decoder, so for now drop a PNG or BMP in /images and it just works.
+    // LVGL uses its PNG/BMP/JPG decoders after this finder returns a path.
+    // Next link: display_ui_set_background() turns that path into an LVGL image.
+    // This means a normal phone-exported lockscreen.jpg works from /images now.
     String lower = path;
     lower.toLowerCase();
-    return lower.endsWith(".png") || lower.endsWith(".bmp");
+    return lower.endsWith(".png") ||
+           lower.endsWith(".bmp") ||
+           lower.endsWith(".jpg");
 }
 
 static String find_nth_wav_in_dir(const char *dir_path, size_t target_index, size_t &current_index)
@@ -84,7 +87,7 @@ static String find_background_image_in_dir(const char *dir_path, String &fallbac
 {
     // This mirrors the WAV search above, but it has one extra rule:
     // a name containing "lockscreen" wins over ordinary album/picture files.
-    // Its returned path travels next to display_ui_set_background() in main.cpp.
+    // Its returned path travels next to display_ui_set_background() through music_controller.cpp.
     File dir = SD_MMC.open(dir_path);
     if (!dir || !dir.isDirectory())
     {
@@ -109,7 +112,7 @@ static String find_background_image_in_dir(const char *dir_path, String &fallbac
             lower.toLowerCase();
             if (lower.indexOf("lockscreen") >= 0)
             {
-                // A file named something like lockscreen.png is the obvious
+                // A file named something like lockscreen.jpg is the obvious
                 // choice even if album art is sitting in this folder too.
                 return path;
             }

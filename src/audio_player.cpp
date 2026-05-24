@@ -18,8 +18,8 @@
 #define AUDIO_VOLUME 70
 
 // How this module links to the screen:
-// start_sd_audio_playback() in main.cpp calls audio_player_start_wav().
-// loop() in main.cpp keeps calling audio_player_loop() to stream the sound.
+// music_controller_start() calls audio_player_start_wav().
+// music_controller_update() keeps calling audio_player_loop() to stream sound.
 // pause_button_event_cb() in display_ui.cpp calls audio_player_toggle_pause().
 
 struct WavInfo
@@ -37,7 +37,7 @@ static File wav_file;
 static WavInfo current_wav;
 // These four values are the playback memory shared by the public functions:
 // audio_player_loop() reads them, toggle_pause() changes audio_paused, and
-// main.cpp reads last_error through audio_player_last_error() for screen text.
+// music_controller.cpp reads last_error through audio_player_last_error() for screen text.
 static bool audio_playing = false;
 static bool audio_paused = false;
 static uint32_t bytes_played = 0;

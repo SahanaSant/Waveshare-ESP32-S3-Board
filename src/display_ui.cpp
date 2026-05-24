@@ -18,16 +18,14 @@ static constexpr lv_coord_t DRAWER_CLOSED_Y = SCREEN_HEIGHT;
 enum MusicView
 {
     VIEW_PLAYLISTS,
-    VIEW_ARTISTS,
-    VIEW_ALBUMS,
     VIEW_SONGS,
-    VIEW_GENRES,
     VIEW_COUNT
 };
 
 static lv_obj_t *time_label = nullptr;
 static lv_obj_t *date_label = nullptr;
 static lv_obj_t *lockscreen_background = nullptr;
+static lv_obj_t *wallpaper_message_label = nullptr;
 // These live on the home/lock screen now. main.cpp updates song/status, and
 // pause_button_event_cb() asks audio_player.cpp to pause or resume playback.
 static lv_obj_t *status_label = nullptr;
@@ -82,7 +80,7 @@ static void gesture_event_cb(lv_event_t *event)
 
 void display_ui_set_time(const char *time_text, const char *date_text)
 {
-    // update_lock_screen_clock() in main.cpp prepares these strings from the
+    // clock_manager_update() in src/clock_manager.cpp prepares these strings from the
     // board's RTC; this function only knows how to put them on the labels.
     if (time_label)
     {
@@ -96,7 +94,7 @@ void display_ui_set_time(const char *time_text, const char *date_text)
 
 void display_ui_set_status(const char *text)
 {
-    // main.cpp uses this while loading/finishing a song, and the pause callback
+    // music_controller.cpp uses this while loading/finishing a song, and the pause callback
     // below reuses it so every playback message lands in the same spot.
     if (status_label)
     {
@@ -106,7 +104,7 @@ void display_ui_set_status(const char *text)
 
 void display_ui_set_song(const char *text)
 {
-    // start_sd_audio_playback() in main.cpp hands us the path that was selected
+    // music_controller_start() in src/music_controller.cpp hands us the path selected
     // by file_browser_find_nth_wav(), such as /music/second_song.wav.
     if (song_label)
     {
@@ -114,11 +112,30 @@ void display_ui_set_song(const char *text)
     }
 }
 
-void display_ui_set_background(const char *image_path)
+void display_ui_set_wallpaper_message(const char *text)
+{
+    if (!wallpaper_message_label)
+    {
+        return;
+    }
+
+    lv_label_set_text(wallpaper_message_label, text ? text : "");
+    if (text && text[0] != '\0')
+    {
+        lv_obj_clear_flag(wallpaper_message_label, LV_OBJ_FLAG_HIDDEN);
+    }
+    else
+    {
+        lv_obj_add_flag(wallpaper_message_label, LV_OBJ_FLAG_HIDDEN);
+    }
+}
+
+bool display_ui_set_background(const char *image_path)
 {
     if (!lockscreen_background || !image_path || image_path[0] == '\0')
     {
-        return;
+        display_ui_set_wallpaper_message("Wallpaper path missing");
+        return false;
     }
 
     // "S:" points at the SD card driver set up by
@@ -126,9 +143,38 @@ void display_ui_set_background(const char *image_path)
     // The picture is kept behind the clock and drawer, like actual wallpaper.
     static String lvgl_path;
     lvgl_path = String("S:") + image_path;
+
+    // First ask LVGL for the dimensions without decoding every pixel. Your LCD
+    // is 320 x 480; a huge phone/tablet PNG cannot be safely shrunk by this
+    // widget. Next practical step is putting a 320 x 480 copy in SD /images.
+    lv_img_header_t header;
+    if (lv_img_decoder_get_info(lvgl_path.c_str(), &header) != LV_RES_OK)
+    {
+        display_ui_set_wallpaper_message("Wallpaper format failed");
+        return false;
+    }
+    if (header.w > SCREEN_WIDTH || header.h > SCREEN_HEIGHT)
+    {
+        display_ui_set_wallpaper_message("Wallpaper too big\nuse 320 x 480");
+        return false;
+    }
+
+    // Opening once here catches a real decode/memory failure. The pixel memory
+    // comes from PSRAM through lv_conf.h; without that, even modest PNG files
+    // can fail before LVGL has anything visible to draw.
+    lv_img_decoder_dsc_t decoder;
+    if (lv_img_decoder_open(&decoder, lvgl_path.c_str(), lv_color_black(), 0) != LV_RES_OK)
+    {
+        display_ui_set_wallpaper_message("Wallpaper decode failed\ntry JPG or BMP");
+        return false;
+    }
+    lv_img_decoder_close(&decoder);
+
     lv_img_set_src(lockscreen_background, lvgl_path.c_str());
     lv_obj_center(lockscreen_background);
     lv_obj_move_background(lockscreen_background);
+    display_ui_set_wallpaper_message("");
+    return true;
 }
 
 void display_ui_set_pause_button_enabled(bool enabled)
@@ -173,13 +219,10 @@ static void pause_button_event_cb(lv_event_t *event)
 static void show_music_view(MusicView view)
 {
     static const char *titles[VIEW_COUNT] = {
-        "PLAYLISTS", "ARTISTS", "ALBUMS", "SONGS", "GENRES"};
+        "PLAYLISTS", "SONGS"};
     static const char *descriptions[VIEW_COUNT] = {
         "Saved playlists\nfrom /music",
-        "Browse artists\nfrom /music",
-        "Browse albums\nfrom /music",
-        "Songs loaded\nfrom SD card",
-        "Browse by genre"};
+        "Songs loaded\nfrom SD card"};
 
     // menu_row_event_cb() passes in the enum belonging to the row that was
     // touched; active_view stores which blue highlight is currently selected.
@@ -307,10 +350,7 @@ static void build_music_drawer(void)
     lv_obj_set_style_bg_opa(menu, LV_OPA_TRANSP, LV_PART_MAIN);
 
     make_menu_row(menu, "Playlists", 0, VIEW_PLAYLISTS);
-    make_menu_row(menu, "Artists", 35, VIEW_ARTISTS);
-    make_menu_row(menu, "Albums", 70, VIEW_ALBUMS);
-    make_menu_row(menu, "Songs", 105, VIEW_SONGS);
-    make_menu_row(menu, "Genres", 140, VIEW_GENRES);
+    make_menu_row(menu, "Songs", 35, VIEW_SONGS);
 
     lv_obj_t *content_panel = lv_obj_create(music_drawer);
     lv_obj_set_size(content_panel, 191, 310);
@@ -342,9 +382,19 @@ void display_ui_create(void)
     lv_obj_add_event_cb(lv_scr_act(), gesture_event_cb, LV_EVENT_GESTURE, NULL);
 
     // Empty until SD is mounted. Later the route is:
-    // main.cpp -> file_browser_find_background_image() -> display_ui_set_background().
+    // music_controller.cpp -> file_browser_find_background_image() -> display_ui_set_background().
     lockscreen_background = lv_img_create(lv_scr_act());
     lv_obj_center(lockscreen_background);
+
+    // Hidden unless wallpaper loading fails. This is intentionally on-screen
+    // because you asked to avoid depending on Serial Monitor for debugging.
+    wallpaper_message_label = lv_label_create(lv_scr_act());
+    lv_label_set_text(wallpaper_message_label, "");
+    lv_obj_set_width(wallpaper_message_label, 270);
+    lv_obj_set_style_text_align(wallpaper_message_label, LV_TEXT_ALIGN_CENTER, LV_PART_MAIN);
+    lv_obj_set_style_text_color(wallpaper_message_label, lv_color_hex(0xFFDF89), LV_PART_MAIN);
+    lv_obj_align(wallpaper_message_label, LV_ALIGN_TOP_MID, 0, 196);
+    lv_obj_add_flag(wallpaper_message_label, LV_OBJ_FLAG_HIDDEN);
 
     date_label = lv_label_create(lv_scr_act());
     lv_label_set_text(date_label, "SUNDAY, MAY 24");

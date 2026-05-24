@@ -4,16 +4,20 @@
 // those same saved widget pointers while music and clock code keep running.
 void display_ui_create(void);
 
-// update_lock_screen_clock() in src/main.cpp calls this twice a second.
+// clock_manager_update() in src/clock_manager.cpp calls this twice a second.
 void display_ui_set_time(const char *time_text, const char *date_text);
 
 // Playback startup/end and pause taps all report what is happening through this.
 void display_ui_set_status(const char *text);
 void display_ui_set_song(const char *text);
 
-// The path comes from file_browser_find_background_image() after
-// sd_manager_register_lvgl_filesystem() has made the SD card visible to LVGL.
-void display_ui_set_background(const char *image_path);
+// The path comes from music_controller_start() after file_browser.cpp finds it.
+// This validates the file before showing it behind the player widgets.
+bool display_ui_set_background(const char *image_path);
+
+// music_controller.cpp calls this for missing wallpaper; set_background()
+// reuses it for format/size errors so they show on the touchscreen, not Serial.
+void display_ui_set_wallpaper_message(const char *text);
 
 // Enabled once audio_player_start_wav() succeeds, disabled when the song ends.
 void display_ui_set_pause_button_enabled(bool enabled);

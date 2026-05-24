@@ -14,7 +14,7 @@
 // This file has two related jobs:
 // 1. sd_manager_mount() turns the physical card into paths like /music/song.wav.
 // 2. sd_manager_register_lvgl_filesystem() gives LVGL an "S:" version of those
-//    same paths, so display_ui_set_background() can draw /images/lockscreen.png.
+//    same paths, so display_ui_set_background() can draw /images/lockscreen.jpg.
 bool sd_manager_mount(void)
 {
     // Tell Arduino exactly which pins the built-in SD slot uses.
@@ -40,7 +40,7 @@ static void *open_lvgl_file(lv_fs_drv_t *driver, const char *path, lv_fs_mode_t 
         return nullptr;
     }
 
-    // display_ui.cpp gives LVGL "S:/images/lockscreen.png". LVGL removes the
+    // display_ui.cpp gives LVGL "S:/images/lockscreen.jpg". LVGL removes the
     // "S:" and hands this callback the remaining path, which SD_MMC understands.
     String full_path = path[0] == '/' ? String(path) : String("/") + path;
     File *file = new File(SD_MMC.open(full_path, FILE_READ));
@@ -66,7 +66,7 @@ static lv_fs_res_t read_lvgl_file(lv_fs_drv_t *driver, void *file_ptr, void *buf
 {
     LV_UNUSED(driver);
     File *file = static_cast<File *>(file_ptr);
-    // The PNG/BMP decoder in LVGL calls this repeatedly while it draws the
+    // The PNG/BMP/JPG decoder in LVGL calls this repeatedly while it draws the
     // wallpaper widget created by display_ui_create().
     *bytes_read = file->read(static_cast<uint8_t *>(buffer), bytes_to_read);
     return LV_FS_RES_OK;
@@ -109,7 +109,7 @@ void sd_manager_register_lvgl_filesystem(void)
 
     // LVGL sees paths beginning with S:, and these callbacks hand those reads
     // over to the very same SD card that holds the songs. After this finishes,
-    // main.cpp can safely call display_ui_set_background("/images/...").
+    // music_controller.cpp can safely call display_ui_set_background("/images/...").
     static lv_fs_drv_t sd_driver;
     lv_fs_drv_init(&sd_driver);
     sd_driver.letter = 'S';
