@@ -32,6 +32,9 @@ void music_controller_start(void)
     String background_path = file_browser_find_background_image("/images");
     if (background_path.length() > 0)
     {
+        // Next linked function: display_ui_set_background() checks dimensions,
+        // draws the wallpaper once before audio begins, and leaves its decoded
+        // pixels cached in PSRAM so this SD card is free for WAV streaming.
         display_ui_set_background(background_path.c_str());
     }
     else
@@ -71,9 +74,17 @@ void music_controller_update(void)
     // toward the speaker without blocking touchscreen handling in main.cpp.
     audio_player_loop();
 
-    if (strcmp(audio_player_last_error(), "Finished") == 0)
+    const char *playback_status = audio_player_last_error();
+    if (strcmp(playback_status, "Finished") == 0)
     {
         display_ui_set_status("Finished");
+        display_ui_set_pause_button_enabled(false);
+    }
+    else if (strcmp(playback_status, "SD removed") == 0)
+    {
+        // This comes from stop_audio_output() in audio_player.cpp after a WAV
+        // read fails early. Show the cause without needing Serial Monitor.
+        display_ui_set_status("SD removed");
         display_ui_set_pause_button_enabled(false);
     }
 }

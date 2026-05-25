@@ -249,6 +249,24 @@ bool audio_player_start_wav(const String &path)
     return true;
 }
 
+static void stop_audio_output(const char *screen_status)
+{
+    // Every way playback stops should come through here. Most importantly,
+    // an SD removal must empty I2S DMA instead of letting a stale fragment
+    // keep reaching the ES8311 speaker as a tick/click.
+    audio_playing = false;
+    audio_paused = false;
+    i2s_zero_dma_buffer(I2S_NUM_0);
+    if (wav_file)
+    {
+        wav_file.close();
+    }
+
+    // Next linked step: music_controller_update() reads this message and
+    // forwards it to display_ui_set_status() on the touchscreen.
+    last_error = screen_status;
+}
+
 void audio_player_loop(void)
 {
     // Small buffers are fine here because loop() runs over and over.
@@ -265,12 +283,18 @@ void audio_player_loop(void)
     }
 
     uint32_t remaining = current_wav.data_size - bytes_played;
-    if (remaining == 0 || !wav_file.available())
+    if (remaining == 0)
     {
         // No more sound bytes. Stop cleanly and clear the DMA buffer so no old audio hangs around.
-        audio_playing = false;
-        i2s_zero_dma_buffer(I2S_NUM_0);
-        last_error = "Finished";
+        stop_audio_output("Finished");
+        return;
+    }
+
+    if (!wav_file || !wav_file.available())
+    {
+        // We expected more WAV bytes, but the file disappeared early. That is
+        // exactly what happens when the SD card is pulled during the song.
+        stop_audio_output("SD removed");
         return;
     }
 
@@ -278,7 +302,9 @@ void audio_player_loop(void)
     size_t bytes_read = wav_file.read(file_buffer, to_read);
     if (bytes_read == 0)
     {
-        audio_playing = false;
+        // A card can disappear between available() above and this actual read.
+        // Silence the output through the same emergency stop path.
+        stop_audio_output("SD removed");
         return;
     }
 

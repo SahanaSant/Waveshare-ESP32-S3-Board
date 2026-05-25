@@ -159,20 +159,17 @@ bool display_ui_set_background(const char *image_path)
         return false;
     }
 
-    // Opening once here catches a real decode/memory failure. The pixel memory
-    // comes from PSRAM through lv_conf.h; without that, even modest PNG files
-    // can fail before LVGL has anything visible to draw.
-    lv_img_decoder_dsc_t decoder;
-    if (lv_img_decoder_open(&decoder, lvgl_path.c_str(), lv_color_black(), 0) != LV_RES_OK)
-    {
-        display_ui_set_wallpaper_message("Wallpaper decode failed\ntry JPG or BMP");
-        return false;
-    }
-    lv_img_decoder_close(&decoder);
-
+    // PNG decoding is slow enough to interrupt streamed sound if it first
+    // happens after the song starts. Show a small loading note, then force
+    // the wallpaper's first render now while music_controller.cpp is still
+    // waiting to open the WAV. LVGL's one-entry image cache keeps this
+    // decoded wallpaper in PSRAM for later clock and drawer redraws.
+    display_ui_set_wallpaper_message("Loading wallpaper...");
+    lv_refr_now(NULL);
     lv_img_set_src(lockscreen_background, lvgl_path.c_str());
     lv_obj_center(lockscreen_background);
     lv_obj_move_background(lockscreen_background);
+    lv_refr_now(NULL);
     display_ui_set_wallpaper_message("");
     return true;
 }
@@ -385,6 +382,9 @@ void display_ui_create(void)
     // music_controller.cpp -> file_browser_find_background_image() -> display_ui_set_background().
     lockscreen_background = lv_img_create(lv_scr_act());
     lv_obj_center(lockscreen_background);
+    // When this eventually fills the screen, it must not swallow the swipe.
+    // Gesture events bubble back to lv_scr_act(), whose callback opens the drawer.
+    lv_obj_add_flag(lockscreen_background, LV_OBJ_FLAG_EVENT_BUBBLE);
 
     // Hidden unless wallpaper loading fails. This is intentionally on-screen
     // because you asked to avoid depending on Serial Monitor for debugging.
