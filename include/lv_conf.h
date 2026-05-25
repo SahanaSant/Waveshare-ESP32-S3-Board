@@ -148,8 +148,9 @@
  *However the opened images might consume additional RAM.
  *0: to disable caching*/
 /* Cache the single lockscreen wallpaper after its first decode. Without this,
- * each redraw can reopen the PNG from SD while audio_player_loop() also needs
- * the card, which sounds like clicking/ticking and makes touch feel frozen. */
+ * each redraw can reopen the PNG from SD while audio_stream_task() in
+ * audio_player.cpp also needs the card for WAV bytes. That SD-card fight was
+ * what sounded like clicking/ticking and made touch feel frozen. */
 #define LV_IMG_CACHE_DEF_SIZE 1
 
 /*Number of stops allowed per gradient. Increase this to allow more stops.

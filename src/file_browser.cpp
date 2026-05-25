@@ -9,6 +9,8 @@
 // This file only picks filenames. It never plays or draws anything itself:
 // music_controller.cpp sends returned WAV paths to audio_player.cpp and returned image
 // paths to display_ui.cpp.
+// Keeping directory walking here avoids making the UI know how SD cards work
+// or making the audio code decide what song "next" means.
 
 static bool is_wav_file(const String &path)
 {
@@ -45,6 +47,8 @@ static String find_nth_wav_in_dir(const char *dir_path, size_t target_index, siz
     File file = dir.openNextFile();
     while (file)
     {
+        // `path` is kept as the complete SD path, not just the visible name,
+        // because audio_player_start_wav() needs to reopen this exact item later.
         String path = file.path();
         if (file.isDirectory())
         {
@@ -80,6 +84,8 @@ String file_browser_find_nth_wav(const char *dir_path, size_t target_index)
     // Start counting from zero every time someone asks for a song.
     // The helper does the real searching because it needs to carry this count through recursion.
     size_t current_index = 0;
+    // The resulting order is SD directory traversal order. If you later want
+    // true alphabetical playlists, this is the module to collect and sort names.
     return find_nth_wav_in_dir(dir_path, target_index, current_index);
 }
 
@@ -133,5 +139,7 @@ String file_browser_find_background_image(const char *dir_path)
     // happens to be named lockscreen yet.
     String fallback;
     String lockscreen = find_background_image_in_dir(dir_path, fallback);
+    // Background decoding/color sampling happens next in display_ui.cpp,
+    // while no song is playing yet so the SD card is not being shared by audio.
     return lockscreen.length() > 0 ? lockscreen : fallback;
 }

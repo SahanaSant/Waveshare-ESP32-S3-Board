@@ -15,6 +15,11 @@
 // 1. sd_manager_mount() turns the physical card into paths like /music/song.wav.
 // 2. sd_manager_register_lvgl_filesystem() gives LVGL an "S:" version of those
 //    same paths, so display_ui_set_background() can draw /images/lockscreen.jpg.
+//
+// Theory bit: the WAV player opens SD files through Arduino's SD_MMC API, but
+// LVGL's image decoder knows nothing about SD_MMC. Registering an LVGL drive is
+// the adapter between them: LVGL asks to read "S:/images/foo.png", these
+// callbacks secretly read the matching file from the physical SD card.
 bool sd_manager_mount(void)
 {
     // Tell Arduino exactly which pins the built-in SD slot uses.
@@ -23,6 +28,8 @@ bool sd_manager_mount(void)
     SD_MMC.setPins(SD_MMC_CLK, SD_MMC_CMD, SD_MMC_D0);
 
     // Mount the card in 1-bit mode.
+    // SD_MMC normally can use multiple data wires, but this particular slot is
+    // wired for the simpler 1-bit bus. It is still fast enough for WAV audio.
     // "/sdmmc" is just the internal mount name; the code still opens files like "/music/song.wav".
     // false = don't format the card if mounting fails, because that would be a very sad surprise.
     // 20000 = 20 MHz SD clock, matching the Waveshare example.
@@ -49,6 +56,8 @@ static void *open_lvgl_file(lv_fs_drv_t *driver, const char *path, lv_fs_mode_t 
         delete file;
         return nullptr;
     }
+    // LVGL stores this opaque pointer and brings it back to read/seek/close.
+    // The heap object is deleted in close_lvgl_file(), so one open has one close.
     return file;
 }
 
@@ -79,6 +88,8 @@ static lv_fs_res_t seek_lvgl_file(lv_fs_drv_t *driver, void *file_ptr, uint32_t 
     File *file = static_cast<File *>(file_ptr);
     uint32_t target = position;
 
+    // Image decoders do not always read from beginning to end. PNG header and
+    // decoder code may jump around, so our adapter must support seek and tell.
     if (origin == LV_FS_SEEK_CUR)
     {
         target = file->position() + position;
@@ -104,6 +115,8 @@ void sd_manager_register_lvgl_filesystem(void)
     static bool registered = false;
     if (registered)
     {
+        // LVGL keeps this driver globally. Registering a second S: drive would
+        // be confusing and unnecessary if startup code is ever called again.
         return;
     }
 
@@ -113,6 +126,9 @@ void sd_manager_register_lvgl_filesystem(void)
     static lv_fs_drv_t sd_driver;
     lv_fs_drv_init(&sd_driver);
     sd_driver.letter = 'S';
+    // This tiny file cache reduces repeated SD reads during decoding. The
+    // much bigger win happens in LVGL image cache: after PNG decoding,
+    // display_ui.cpp keeps the rendered wallpaper available in PSRAM.
     sd_driver.cache_size = 1024;
     sd_driver.open_cb = open_lvgl_file;
     sd_driver.close_cb = close_lvgl_file;

@@ -4,6 +4,7 @@
 
 // src/music_controller.cpp asks for index 1, which means the second WAV on the SD card.
 // That returned path is handed straight to audio_player_start_wav().
+// Previous/next also use this function with a neighboring index.
 String file_browser_find_nth_wav(const char *dir_path, size_t target_index);
 
 // src/music_controller.cpp uses this after mounting the SD card, then passes the returned

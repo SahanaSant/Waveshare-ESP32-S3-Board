@@ -2,9 +2,34 @@
 // audio_player.cpp
 //  WAV/MP3 playback, pause, next, volume
 // ============================================================================
+//
+// AUDIO THEORY MAP
+// ----------------
+// A PCM WAV file is already a timeline of speaker sample numbers; there is no
+// MP3-style decompression step here. For 16-bit stereo it looks conceptually
+// like: left sample, right sample, left sample, right sample, over and over.
+//
+// Flow through this module:
+//   SD_MMC File -> stream_audio_chunk() -> I2S DMA buffers -> ES8311 codec
+//   -> speaker/headphone output.
+//
+// I2S is a digital audio wire protocol. It sends:
+//   MCLK = master clock used by the codec internally
+//   BCLK = ticks individual sample bits across the wire
+//   LRCK = identifies left vs right sample timing
+//   SDOUT = the actual PCM bit stream
+//
+// DMA (direct memory access) is the reason playback can be smooth: hardware
+// drains queued sample buffers into I2S without asking the CPU for every bit.
+// But DMA is not infinite. If UI redraws block the only code feeding it, its
+// queue empties and the speaker produces clicks/broken sound. This project
+// fixed that by feeding DMA from audio_stream_task() independently of LVGL.
 
 #include <SD_MMC.h>
 #include "driver/i2s.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/semphr.h"
+#include "freertos/task.h"
 #include "../_official_3p5_demo/Arduino/libraries/es8311/es8311.h"
 #include "../_official_3p5_demo/Arduino/libraries/es8311/es8311.cpp"
 #include "audio_player.h"
@@ -15,11 +40,12 @@
 #define I2S_SDOUT 16
 
 #define AUDIO_MCLK_MULTIPLE 256
-#define AUDIO_VOLUME 70
+#define AUDIO_START_VOLUME 70
 
 // How this module links to the screen:
 // music_controller_start() calls audio_player_start_wav().
-// music_controller_update() keeps calling audio_player_loop() to stream sound.
+// A private FreeRTOS task below keeps audio streaming while LVGL draws.
+// music_controller_update() only reads last_error for screen messages.
 // pause_button_event_cb() in display_ui.cpp calls audio_player_toggle_pause().
 
 struct WavInfo
@@ -33,15 +59,55 @@ struct WavInfo
     uint16_t bits_per_sample = 0;
 };
 
+// `wav_file` stays open for the current song. It is read only by the audio
+// task while audio_mutex is held; next/previous takes that same mutex before
+// closing/replacing it. That prevents "read from a file while another context
+// closes it" crashes and corrupted transitions.
 static File wav_file;
 static WavInfo current_wav;
-// These four values are the playback memory shared by the public functions:
-// audio_player_loop() reads them, toggle_pause() changes audio_paused, and
-// music_controller.cpp reads last_error through audio_player_last_error() for screen text.
-static bool audio_playing = false;
-static bool audio_paused = false;
-static uint32_t bytes_played = 0;
-static const char *last_error = "";
+// These values are shared between two jobs:
+// audio_stream_task() reads the file on its own core, while the LVGL/button
+// side toggles pause and reads its status. Volatile makes each job re-check
+// the tiny flags instead of keeping an old value while the other job changes it.
+static volatile bool audio_playing = false;
+static volatile bool audio_paused = false;
+static volatile uint32_t bytes_played = 0;
+static const char *volatile last_error = "";
+static TaskHandle_t audio_task_handle = nullptr;
+static SemaphoreHandle_t audio_mutex = nullptr;
+// ES8311 is the physical digital-to-analog codec. Saving its handle lets the
+// volume slider change output gain immediately without restarting playback.
+static es8311_handle_t codec_handle = nullptr;
+static bool i2s_ready = false;
+static uint8_t playback_volume = AUDIO_START_VOLUME;
+
+static void stream_audio_chunk(void);
+
+static void audio_stream_task(void *unused)
+{
+    (void)unused;
+
+    // This task is deliberately separate from loop() in main.cpp. A menu
+    // animation can spend time pushing pixels to the LCD; this job still gets
+    // scheduled and feeds I2S before its DMA queue goes empty and sounds broken.
+    for (;;)
+    {
+        if (audio_playing && !audio_paused)
+        {
+            // stream_audio_chunk() normally blocks inside i2s_write() until
+            // DMA has room. That is useful back-pressure: we naturally read
+            // SD at approximately the rate the speaker consumes samples.
+            stream_audio_chunk();
+        }
+        else
+        {
+            // Paused/stopped music does not need to spin at full speed.
+            // The next linked action is audio_player_toggle_pause(), which
+            // flips audio_paused and lets this task start feeding samples again.
+            vTaskDelay(pdMS_TO_TICKS(5));
+        }
+    }
+}
 
 static uint16_t read_u16(File &file)
 {
@@ -99,6 +165,8 @@ static bool parse_wav_header(File &file, WavInfo &info)
         return false;
     }
 
+    // The RIFF total-size field is useful for generic parsers, but playback
+    // cares about the later `data` chunk size, so we only step past it here.
     read_u32(file);
     if (!read_fourcc(file, id) || !fourcc_equals(id, "WAVE"))
     {
@@ -120,6 +188,8 @@ static bool parse_wav_header(File &file, WavInfo &info)
         }
 
         uint32_t chunk_size = read_u32(file);
+        // WAV chunks are padded to an even byte boundary. If a metadata chunk
+        // has an odd length, the `+ (chunk_size & 1)` skips its pad byte.
         uint32_t next_chunk = file.position() + chunk_size + (chunk_size & 1);
 
         if (fourcc_equals(id, "fmt "))
@@ -129,6 +199,9 @@ static bool parse_wav_header(File &file, WavInfo &info)
             audio_format = read_u16(file);
             info.channels = read_u16(file);
             info.sample_rate = read_u32(file);
+            // Byte rate and frame/block alignment are in the fmt chunk too,
+            // but this simple PCM streamer does not need them after validating
+            // channels, sample rate, and bit depth.
             read_u32(file);
             read_u16(file);
             info.bits_per_sample = read_u16(file);
@@ -163,8 +236,11 @@ static bool init_audio_codec(uint32_t sample_rate)
 {
     // ES8311 is the little audio codec chip that turns I2S digital audio into speaker/headphone sound.
     // We set it to the same sample rate as the WAV so the song does not play too fast or too slow.
-    es8311_handle_t es_handle = es8311_create(I2C_NUM_0, ES8311_ADDRRES_0);
-    if (!es_handle)
+    if (!codec_handle)
+    {
+        codec_handle = es8311_create(I2C_NUM_0, ES8311_ADDRRES_0);
+    }
+    if (!codec_handle)
     {
         return false;
     }
@@ -176,16 +252,21 @@ static bool init_audio_codec(uint32_t sample_rate)
         .mclk_frequency = (int)(sample_rate * AUDIO_MCLK_MULTIPLE),
         .sample_frequency = (int)sample_rate};
 
-    if (es8311_init(es_handle, &es_clk, ES8311_RESOLUTION_16, ES8311_RESOLUTION_16) != ESP_OK)
+    // Codec and I2S must agree on sample rate. Playing 44.1 kHz bytes through
+    // clocks configured for 22.05 kHz would make audio run slow and pitched down.
+    if (es8311_init(codec_handle, &es_clk, ES8311_RESOLUTION_16, ES8311_RESOLUTION_16) != ESP_OK)
     {
         return false;
     }
 
-    es8311_voice_volume_set(es_handle, AUDIO_VOLUME, NULL);
-    es8311_microphone_config(es_handle, false);
+    // playback_volume can already have been changed by the UI slider. When
+    // next/previous opens another WAV, keep the listener's chosen volume.
+    es8311_voice_volume_set(codec_handle, playback_volume, NULL);
+    es8311_microphone_config(codec_handle, false);
 
     // I2S is the audio "conveyor belt" from the ESP32 to the ES8311.
-    // DMA buffers let hardware keep pushing sound while our code reads the next SD card chunk.
+    // DMA buffers let hardware keep pushing sound while our task reads the next
+    // SD chunk. Twelve buffers give swipes/view redraws extra audio cushion.
     const i2s_config_t i2s_config = {
         .mode = (i2s_mode_t)(I2S_MODE_MASTER | I2S_MODE_TX),
         .sample_rate = sample_rate,
@@ -193,8 +274,13 @@ static bool init_audio_codec(uint32_t sample_rate)
         .channel_format = I2S_CHANNEL_FMT_RIGHT_LEFT,
         .communication_format = I2S_COMM_FORMAT_STAND_I2S,
         .intr_alloc_flags = ESP_INTR_FLAG_LEVEL1,
-        .dma_buf_count = 8,
+        // 12 blocks x 512 sample slots is deliberate cushioning. The LCD can
+        // have bursts of expensive SPI drawing during gestures; these queued
+        // samples keep leaving the speaker smoothly during that burst.
+        .dma_buf_count = 12,
         .dma_buf_len = 512,
+        // APLL gives the audio clock a steadier frequency. Auto-clear emits
+        // silence instead of replaying stale garbage if DMA ever under-runs.
         .use_apll = true,
         .tx_desc_auto_clear = true,
         .fixed_mclk = (int)(sample_rate * AUDIO_MCLK_MULTIPLE),
@@ -210,6 +296,17 @@ static bool init_audio_codec(uint32_t sample_rate)
         .data_out_num = I2S_SDOUT,
         .data_in_num = I2S_PIN_NO_CHANGE};
 
+    // Changing tracks may also mean changing WAV sample rate. The controller
+    // has stopped the streaming task and holds audio_mutex before we get here,
+    // so it is safe to reset I2S and configure it for the new song.
+    if (i2s_ready)
+    {
+        // Do not leave the former song's queued samples around when selecting
+        // a WAV with potentially different timing information.
+        i2s_driver_uninstall(I2S_NUM_0);
+        i2s_ready = false;
+    }
+
     if (i2s_driver_install(I2S_NUM_0, &i2s_config, 0, NULL) != ESP_OK)
     {
         return false;
@@ -221,31 +318,84 @@ static bool init_audio_codec(uint32_t sample_rate)
     }
 
     i2s_zero_dma_buffer(I2S_NUM_0);
+    i2s_ready = true;
     return true;
 }
 
 bool audio_player_start_wav(const String &path)
 {
+    // Previous/next can call this while the private playback task exists.
+    // Pause new reads first, then use the mutex so an SD read cannot overlap
+    // closing the old file and opening the new one.
+    if (!audio_mutex)
+    {
+        audio_mutex = xSemaphoreCreateMutex();
+        if (!audio_mutex)
+        {
+            last_error = "Audio lock failed";
+            return false;
+        }
+    }
+
+    audio_playing = false;
+    // A mutex is like the single key to the audio-file workbench. The
+    // streaming task and track-change code cannot both touch wav_file/I2S
+    // while only one of them is holding the key.
+    xSemaphoreTake(audio_mutex, portMAX_DELAY);
+    if (i2s_ready)
+    {
+        // Immediately remove a tail of old-song samples so next/previous does
+        // not sound as if a fraction of the last song leaks into the new one.
+        i2s_zero_dma_buffer(I2S_NUM_0);
+    }
+    if (wav_file)
+    {
+        wav_file.close();
+    }
+
     // Open the chosen file, read its WAV header, then configure audio hardware to match it.
     wav_file = SD_MMC.open(path, "r");
     if (!wav_file || !parse_wav_header(wav_file, current_wav))
     {
         last_error = "Use 16-bit PCM WAV";
+        xSemaphoreGive(audio_mutex);
         return false;
     }
 
     if (!init_audio_codec(current_wav.sample_rate))
     {
         last_error = "Audio init failed";
+        wav_file.close();
+        xSemaphoreGive(audio_mutex);
         return false;
     }
 
     // Jump past the WAV header/chunks so the next read starts on real audio sample bytes.
     wav_file.seek(current_wav.data_offset);
     bytes_played = 0;
+
+    if (!audio_task_handle)
+    {
+        // Arduino loop()/LVGL runs on core 1 for this board. Keep SD-to-I2S
+        // streaming on core 0 so display flushing cannot pause the song.
+        // The task calls stream_audio_chunk() below; the UI only observes status.
+        BaseType_t task_started = xTaskCreatePinnedToCore(
+            // Priority 3 gives the feeding job reliable scheduling without
+            // turning the entire UI into a lower-priority afterthought.
+            audio_stream_task, "wav_stream", 4096, nullptr, 3, &audio_task_handle, 0);
+        if (task_started != pdPASS)
+        {
+            wav_file.close();
+            last_error = "Audio task failed";
+            xSemaphoreGive(audio_mutex);
+            return false;
+        }
+    }
+
     audio_playing = true;
     audio_paused = false;
     last_error = "";
+    xSemaphoreGive(audio_mutex);
     return true;
 }
 
@@ -256,7 +406,12 @@ static void stop_audio_output(const char *screen_status)
     // keep reaching the ES8311 speaker as a tick/click.
     audio_playing = false;
     audio_paused = false;
-    i2s_zero_dma_buffer(I2S_NUM_0);
+    if (i2s_ready)
+    {
+        // This line fixed the ticking after pulling the SD card: without it,
+        // the last tiny DMA fragment could remain audible as repeated clicking.
+        i2s_zero_dma_buffer(I2S_NUM_0);
+    }
     if (wav_file)
     {
         wav_file.close();
@@ -267,18 +422,25 @@ static void stop_audio_output(const char *screen_status)
     last_error = screen_status;
 }
 
-void audio_player_loop(void)
+static void stream_audio_chunk(void)
 {
-    // Small buffers are fine here because loop() runs over and over.
+    // This is called by audio_stream_task(), not by the touchscreen/display
+    // loop. The larger chunk also cuts down how often streaming has to visit SD.
     // file_buffer gets raw bytes from the SD card.
     // stereo_buffer is only used when a mono WAV needs to be duplicated into left+right.
-    static uint8_t file_buffer[2048];
-    static int16_t stereo_buffer[2048];
+    static uint8_t file_buffer[4096];
+    static int16_t stereo_buffer[4096];
 
     // Pausing is delightfully simple here: leave the file position alone,
     // and stop reading/sending chunks until the button says go again.
+    if (!audio_mutex || xSemaphoreTake(audio_mutex, portMAX_DELAY) != pdTRUE)
+    {
+        return;
+    }
+
     if (!audio_playing || audio_paused)
     {
+        xSemaphoreGive(audio_mutex);
         return;
     }
 
@@ -287,6 +449,7 @@ void audio_player_loop(void)
     {
         // No more sound bytes. Stop cleanly and clear the DMA buffer so no old audio hangs around.
         stop_audio_output("Finished");
+        xSemaphoreGive(audio_mutex);
         return;
     }
 
@@ -295,16 +458,20 @@ void audio_player_loop(void)
         // We expected more WAV bytes, but the file disappeared early. That is
         // exactly what happens when the SD card is pulled during the song.
         stop_audio_output("SD removed");
+        xSemaphoreGive(audio_mutex);
         return;
     }
 
     size_t to_read = min((uint32_t)sizeof(file_buffer), remaining);
+    // Reading blocks rather than individual samples is important: SD cards
+    // have transaction overhead, so a chunky sequential read is far cheaper.
     size_t bytes_read = wav_file.read(file_buffer, to_read);
     if (bytes_read == 0)
     {
         // A card can disappear between available() above and this actual read.
         // Silence the output through the same emergency stop path.
         stop_audio_output("SD removed");
+        xSemaphoreGive(audio_mutex);
         return;
     }
 
@@ -325,13 +492,18 @@ void audio_player_loop(void)
             stereo_buffer[i * 2] = mono_samples[i];
             stereo_buffer[i * 2 + 1] = mono_samples[i];
         }
+        // The destination buffer is twice as wide because it holds a separate
+        // left and right copy for every original mono sample.
         write_buffer = stereo_buffer;
         write_bytes = sample_count * sizeof(int16_t) * 2;
     }
 
-    // This is the actual "make noise" call: hand the sample bytes to I2S and wait until accepted.
+    // This is the actual "make noise" call: hand sample bytes to I2S DMA and
+    // wait until it accepts them. Hardware plays queued samples afterward;
+    // this function is stocking a shelf, not bit-banging the speaker itself.
     size_t bytes_written = 0;
     i2s_write(I2S_NUM_0, write_buffer, write_bytes, &bytes_written, portMAX_DELAY);
+    xSemaphoreGive(audio_mutex);
 }
 
 bool audio_player_toggle_pause(void)
@@ -353,9 +525,43 @@ bool audio_player_is_paused(void)
     return audio_paused;
 }
 
+void audio_player_set_volume(uint8_t volume)
+{
+    playback_volume = min((uint8_t)100, volume);
+
+    // The slider can be touched before a WAV has opened. Save the value either
+    // way, and only talk to the codec once init_audio_codec() has created it.
+    // Next song startup above reapplies the same saved level.
+    if (codec_handle)
+    {
+        // Changing codec gain is cheap and does not rewrite or re-scale all
+        // PCM samples in RAM. It is the embedded-audio equivalent of turning
+        // the amp level knob while the stream continues.
+        es8311_voice_volume_set(codec_handle, playback_volume, NULL);
+    }
+}
+
+uint16_t audio_player_progress_per_mille(void)
+{
+    // The streaming task increases bytes_played as it sends sound. The main
+    // UI loop reads this tiny snapshot through music_controller_update(), then
+    // display_ui_set_progress() moves the one now-playing bar on screen.
+    uint32_t total_bytes = current_wav.data_size;
+    uint32_t played_bytes = bytes_played;
+    if (total_bytes == 0)
+    {
+        return 0;
+    }
+    if (played_bytes >= total_bytes)
+    {
+        return 1000;
+    }
+    return (uint16_t)((played_bytes * 1000ULL) / total_bytes);
+}
+
 const char *audio_player_last_error(void)
 {
-    // Tiny status pipe back to main/display_ui.
+    // Tiny status pipe back to music_controller_update() and then display_ui.
     // Empty string means no problem right now.
     return last_error;
 }

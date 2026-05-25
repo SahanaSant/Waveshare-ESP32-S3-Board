@@ -18,6 +18,12 @@
 // main.cpp stays on hardware wiring and scheduling. Follow the feature code to:
 // clock_manager.cpp for RTC/time, music_controller.cpp for SD + song startup,
 // display_ui.cpp for widgets, and audio_player.cpp for actual sound bytes.
+//
+// A useful way to picture this app:
+//   setup() = plug every physical subsystem in and build the first screen once.
+//   loop()  = keep the interface responsive; it is not responsible for pouring
+//             audio bytes anymore, because audio_player.cpp has its own task.
+// That split is why dragging controls can no longer starve the speaker.
 
 // ============================================================================
 //  BOARD PIN MAP
@@ -45,6 +51,10 @@
 TCA9554 TCA(0x20);
 TouchDrvFT6X36 touch;
 
+// The screen is not connected like a desktop monitor. Arduino_GFX pushes pixel
+// data over SPI: a serial stream of bytes sent down physical wires. LCD_DC says
+// whether a transfer is a command or image data; CS is unused because this
+// board wires the panel as the permanently-selected SPI screen.
 Arduino_DataBus *bus = new Arduino_ESP32SPI(
     LCD_DC /* DC */, LCD_CS /* CS */, SPI_SCLK /* SCK */, SPI_MOSI /* MOSI */, SPI_MISO /* MISO */);
 Arduino_GFX *gfx = new Arduino_ST7796(
@@ -63,12 +73,21 @@ lv_color_t *disp_draw_buf1;
 lv_color_t *disp_draw_buf2;
 lv_disp_drv_t disp_drv;
 
+// LVGL does not hold a full second screen image here. Instead it renders into
+// strips, then calls my_disp_flush() to send each changed strip to the LCD.
+// Two buffers mean LVGL can prepare the next strip while the driver finishes
+// handing off the previous one. Audio is kept independent because any big
+// LCD transfer can still occupy CPU time for a moment.
+
 // ============================================================================
 //  DISPLAY HARDWARE HELPERS
 //  Panel reset and the bridge from LVGL pixels to the physical LCD
 // ============================================================================
 void lcd_reset(void)
 {
+    // On this board the display reset pin is behind the TCA9554 I/O expander,
+    // not directly on the ESP32. The high-low-high pulse is the hardware
+    // equivalent of turning the LCD controller off and cleanly back on.
     TCA.write1(1, 1);
     delay(10);
     TCA.write1(1, 0);
@@ -79,9 +98,14 @@ void lcd_reset(void)
 
 void my_disp_flush(lv_disp_drv_t *disp, const lv_area_t *area, lv_color_t *color_p)
 {
+    // LVGL gives us exactly the rectangular region that changed. Sending only
+    // that rectangle is much cheaper than redrawing all 320 x 480 pixels for
+    // every moving progress bar or clock update.
     uint32_t w = area->x2 - area->x1 + 1;
     uint32_t h = area->y2 - area->y1 + 1;
     gfx->draw16bitRGBBitmap(area->x1, area->y1, (uint16_t *)&color_p->full, w, h);
+    // This acknowledgement matters: until LVGL sees "ready", it considers
+    // color_p busy and will not reuse that draw buffer for another region.
     lv_disp_flush_ready(disp);
 }
 
@@ -97,12 +121,16 @@ void my_touchpad_read(lv_indev_drv_t *indev_drv, lv_indev_data_t *data)
 
     if (touched)
     {
+        // LVGL does the gesture recognition later. Our job here is just to
+        // report "finger down at this coordinate" every time it asks.
         data->state = LV_INDEV_STATE_PR;
         data->point.x = x[0];
         data->point.y = y[0];
     }
     else
     {
+        // The release transition lets LVGL finish a click or calculate the
+        // direction of a swipe. See gesture_event_cb() in display_ui.cpp next.
         data->state = LV_INDEV_STATE_REL;
     }
 }
@@ -114,6 +142,8 @@ void my_touchpad_read(lv_indev_drv_t *indev_drv, lv_indev_data_t *data)
 // ============================================================================
 void setup(void)
 {
+    // I2C is the shared slow control bus: touch, GPIO expander, audio codec,
+    // and RTC can all receive small configuration messages over these wires.
     Wire.begin(I2C_SDA, I2C_SCL);
     // Next linked module: clock_manager.cpp owns the RTC after I2C is ready.
     clock_manager_init();
@@ -142,6 +172,9 @@ void setup(void)
 
     screenWidth = gfx->width();
     screenHeight = gfx->height();
+    // One draw buffer is 120 rows rather than a whole screen. At RGB565 that
+    // is 320 * 120 * 2 bytes, a sensible compromise between smooth rendering
+    // and leaving RAM available for audio buffers and the rest of the app.
     bufSize = screenWidth * 120;
 
     disp_draw_buf1 = (lv_color_t *)heap_caps_malloc(bufSize * 2, MALLOC_CAP_DEFAULT | MALLOC_CAP_8BIT);
@@ -164,6 +197,8 @@ void setup(void)
     disp_drv.draw_buf = &draw_buf;
     lv_disp_drv_register(&disp_drv);
 
+    // Register touch as an LVGL pointer device. LVGL will now call
+    // my_touchpad_read() during lv_timer_handler() in loop().
     static lv_indev_drv_t indev_drv;
     lv_indev_drv_init(&indev_drv);
     indev_drv.type = LV_INDEV_TYPE_POINTER;
@@ -174,6 +209,9 @@ void setup(void)
     // status into them. See display_ui_create() for the visible layout.
     display_ui_create();
     clock_manager_update();
+    // Important order: music_controller_start() may decode/copy wallpaper
+    // pixels from SD. It does that now, before audio_player.cpp starts the WAV
+    // streaming task, so loading art cannot cause song clicks.
     music_controller_start();
 }
 
@@ -190,6 +228,8 @@ void loop(void)
 
     // LVGL runs touchscreen callbacks here. For example, tapping pause jumps
     // to pause_button_event_cb() in src/display_ui.cpp.
+    // This can take noticeable time when a drawer animation redraws pixels,
+    // which is precisely why audio bytes are fed on a different FreeRTOS task.
     lv_timer_handler();
     delay(5);
 }

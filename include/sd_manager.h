@@ -6,4 +6,5 @@ bool sd_manager_mount(void);
 
 // Called by src/music_controller.cpp after mounting succeeds. This gives LVGL the "S:"
 // drive used later by display_ui_set_background() in src/display_ui.cpp.
+// It does not duplicate files; it is just an adapter from LVGL file calls to SD_MMC.
 void sd_manager_register_lvgl_filesystem(void);
